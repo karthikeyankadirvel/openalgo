@@ -50,7 +50,7 @@ generate_hex() {
 # Function to validate broker name
 validate_broker() {
     local broker=$1
-    local valid_brokers="fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,definedge,dhan,dhan_sandbox,firstock,flattrade,fyers,groww,ibulls,iifl,indmoney,kotak,motilal,mstock,paytm,pocketful,shoonya,tradejini,upstox,wisdom,zebu,zerodha"
+    local valid_brokers="fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,definedge,dhan,dhan_sandbox,firstock,flattrade,fyers,groww,ibulls,iifl,indmoney,jainamxts,kotak,motilal,mstock,paytm,pocketful,samco,shoonya,tradejini,upstox,wisdom,zebu,zerodha"
 
     if [[ $valid_brokers == *"$broker"* ]]; then
         return 0
@@ -62,7 +62,7 @@ validate_broker() {
 # Function to check if broker is XTS based
 is_xts_broker() {
     local broker=$1
-    local xts_brokers="fivepaisaxts,compositedge,ibulls,iifl,wisdom"
+    local xts_brokers="fivepaisaxts,compositedge,ibulls,iifl,jainamxts,wisdom"
     if [[ $xts_brokers == *"$broker"* ]]; then
         return 0
     else
@@ -152,7 +152,7 @@ for ((i=1; i<=INSTANCES; i++)); do
 
     # Get broker
     while true; do
-        log_message "\nValid brokers: fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,definedge,dhan,dhan_sandbox,firstock,flattrade,fyers,groww,ibulls,iifl,indmoney,kotak,motilal,paytm,pocketful,shoonya,tradejini,upstox,wisdom,zebu,zerodha,mstock" "$BLUE"
+        log_message "\nValid brokers: fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,definedge,dhan,dhan_sandbox,firstock,flattrade,fyers,groww,ibulls,iifl,indmoney,jainamxts,kotak,motilal,mstock,paytm,pocketful,samco,shoonya,tradejini,upstox,wisdom,zebu,zerodha" "$BLUE"
         read -p "Enter broker name for instance $i: " broker
         if validate_broker "$broker"; then
             BROKERS+=("$broker")
@@ -206,7 +206,8 @@ log_message "\n=== INSTALLING SYSTEM PACKAGES ===" "$YELLOW"
 sudo apt-get update && sudo apt-get upgrade -y
 check_status "Failed to update system"
 
-sudo apt-get install -y python3 python3-venv python3-pip python3-full nginx git software-properties-common snapd ufw certbot python3-certbot-nginx
+sudo apt-get install -y python3 python3-venv python3-pip python3-full nginx git software-properties-common snapd ufw certbot python3-certbot-nginx \
+    libopenblas0 libgomp1 libgfortran5
 check_status "Failed to install packages"
 
 # Install uv
@@ -353,9 +354,17 @@ for ((i=1; i<=INSTANCES; i++)); do
     # Set permissions
     log_message "Setting permissions..." "$BLUE"
     sudo mkdir -p "$INSTANCE_DIR/db"
-    sudo mkdir -p "$INSTANCE_DIR/tmp"
+    sudo mkdir -p "$INSTANCE_DIR/tmp/numba_cache"
+    sudo mkdir -p "$INSTANCE_DIR/tmp/matplotlib"
+    # Create directories for Python strategy feature
+    sudo mkdir -p "$INSTANCE_DIR/strategies/scripts"
+    sudo mkdir -p "$INSTANCE_DIR/strategies/examples"
+    sudo mkdir -p "$INSTANCE_DIR/log/strategies"
+    sudo mkdir -p "$INSTANCE_DIR/keys"
     sudo chown -R www-data:www-data "$INSTANCE_DIR"
     sudo chmod -R 755 "$INSTANCE_DIR"
+    # Set more restrictive permissions for sensitive directories
+    sudo chmod 700 "$INSTANCE_DIR/keys"
     [ -S "$SOCKET_FILE" ] && sudo rm -f "$SOCKET_FILE"
 
     # Configure Nginx (initial for SSL)
@@ -476,6 +485,11 @@ server {
         proxy_connect_timeout 300s;
         proxy_send_timeout 300s;
 
+        # Increased buffer sizes for large headers (auth tokens, session cookies)
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
@@ -501,15 +515,28 @@ After=network.target
 User=www-data
 Group=www-data
 WorkingDirectory=$INSTANCE_DIR
+# Environment variables for numba/scipy support
+Environment="TMPDIR=$INSTANCE_DIR/tmp"
+Environment="NUMBA_CACHE_DIR=$INSTANCE_DIR/tmp/numba_cache"
+Environment="LLVMLITE_TMPDIR=$INSTANCE_DIR/tmp"
+Environment="MPLCONFIGDIR=$INSTANCE_DIR/tmp/matplotlib"
+# Limit OpenBLAS/NumPy threads to prevent RLIMIT_NPROC exhaustion
+# See: https://github.com/marketcalls/openalgo/issues/822
+Environment="OPENBLAS_NUM_THREADS=2"
+Environment="OMP_NUM_THREADS=2"
+Environment="MKL_NUM_THREADS=2"
+Environment="NUMEXPR_NUM_THREADS=2"
+Environment="NUMBA_NUM_THREADS=2"
 ExecStart=/bin/bash -c 'source $VENV_PATH/bin/activate && $VENV_PATH/bin/gunicorn \\
     --worker-class eventlet \\
     -w 1 \\
     --bind unix:$SOCKET_FILE \\
+    --timeout 300 \\
     --log-level info \\
     app:app'
 Restart=always
 RestartSec=5
-TimeoutSec=60
+TimeoutSec=300
 
 [Install]
 WantedBy=multi-user.target

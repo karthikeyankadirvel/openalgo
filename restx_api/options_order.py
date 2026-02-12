@@ -5,6 +5,7 @@ POST /api/v1/optionsorder
 
 Places option orders by resolving option symbol based on underlying and offset,
 then placing the order. Works in both live and analyze (sandbox) mode.
+Supports order splitting via optional splitsize parameter.
 
 Request Body:
 {
@@ -18,6 +19,7 @@ Request Body:
     "option_type": "CE",  // CE or PE
     "action": "BUY",  // or "SELL"
     "quantity": 75,
+    "splitsize": 0,  // Optional: If > 0, splits order into multiple orders of this size
     "pricetype": "MARKET",  // or "LIMIT", "SL", "SL-M"
     "product": "MIS",  // or "NRML"
     "price": 0.0,  // For LIMIT orders
@@ -25,7 +27,7 @@ Request Body:
     "disclosed_quantity": 0
 }
 
-Response (Success - Live Mode):
+Response (Success - Live Mode - Regular Order):
 {
     "status": "success",
     "orderid": "240123000001234",
@@ -35,6 +37,24 @@ Response (Success - Live Mode):
     "underlying_ltp": 23587.50,
     "offset": "ITM2",
     "option_type": "CE"
+}
+
+Response (Success - Split Order):
+{
+    "status": "success",
+    "symbol": "NIFTY28NOV2423500CE",
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "underlying_ltp": 23587.50,
+    "offset": "ITM2",
+    "option_type": "CE",
+    "total_quantity": 150,
+    "split_size": 50,
+    "results": [
+        {"order_num": 1, "quantity": 50, "status": "success", "orderid": "240123000001234"},
+        {"order_num": 2, "quantity": 50, "status": "success", "orderid": "240123000001235"},
+        {"order_num": 3, "quantity": 50, "status": "success", "orderid": "240123000001236"}
+    ]
 }
 
 Response (Success - Analyze Mode):
@@ -57,26 +77,28 @@ Response (Error):
 }
 """
 
-from flask import request, jsonify, make_response
+import os
+
+from flask import jsonify, make_response, request
 from flask_restx import Namespace, Resource
 from marshmallow import ValidationError
+
 from limiter import limiter
-from utils.logging import get_logger
 from restx_api.schemas import OptionsOrderSchema
 from services.place_options_order_service import place_options_order
-import os
+from utils.logging import get_logger
 
 # Initialize logger
 logger = get_logger(__name__)
 
 # Create namespace
-api = Namespace('optionsorder', description='Place Options Order API')
+api = Namespace("optionsorder", description="Place Options Order API")
 
 # Get rate limit from environment
 ORDER_RATE_LIMIT = os.getenv("ORDER_RATE_LIMIT", "10 per second")
 
 
-@api.route('/', strict_slashes=False)
+@api.route("/", strict_slashes=False)
 class OptionsOrder(Resource):
     @limiter.limit(ORDER_RATE_LIMIT)
     def post(self):
@@ -90,7 +112,7 @@ class OptionsOrder(Resource):
             data = schema.load(request.json)
 
             # Extract API key
-            api_key = data.get('apikey')
+            api_key = data.get("apikey")
 
             logger.info(
                 f"Options order API request: underlying={data.get('underlying')}, "
@@ -99,23 +121,21 @@ class OptionsOrder(Resource):
 
             # Call the service function to place the options order
             success, response_data, status_code = place_options_order(
-                options_data=data,
-                api_key=api_key
+                options_data=data, api_key=api_key
             )
 
             return make_response(jsonify(response_data), status_code)
 
         except ValidationError as err:
             logger.warning(f"Validation error in options order request: {err.messages}")
-            return make_response(jsonify({
-                'status': 'error',
-                'message': 'Validation error',
-                'errors': err.messages
-            }), 400)
-        except Exception as e:
+            return make_response(
+                jsonify({"status": "error", "message": "Validation error", "errors": err.messages}),
+                400,
+            )
+        except Exception:
             logger.exception("An unexpected error occurred in OptionsOrder endpoint.")
             error_response = {
-                'status': 'error',
-                'message': 'An unexpected error occurred in the API endpoint'
+                "status": "error",
+                "message": "An unexpected error occurred in the API endpoint",
             }
             return make_response(jsonify(error_response), 500)

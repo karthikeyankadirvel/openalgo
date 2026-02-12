@@ -1,25 +1,21 @@
-import threading
 import json
 import logging
+import os
+import sys
+import threading
 import time
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
 
 from broker.indmoney.streaming.indWebSocket import IndWebSocket
 from database.auth_db import get_auth_token
 
-import sys
-import os
-
 # Add parent directory to path to allow imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../'))
+sys.path.append(os.path.join(os.path.dirname(__file__), "../../../"))
 
 from websocket_proxy.base_adapter import BaseBrokerWebSocketAdapter
 from websocket_proxy.mapping import SymbolMapper
-from .indmoney_mapping import (
-    IndmoneyExchangeMapper,
-    IndmoneyModeMapper,
-    IndmoneyCapabilityRegistry
-)
+
+from .indmoney_mapping import IndmoneyCapabilityRegistry, IndmoneyExchangeMapper, IndmoneyModeMapper
 
 
 class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
@@ -37,8 +33,11 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         self.max_reconnect_attempts = 10
         self.running = False
         self.lock = threading.Lock()
+        self.last_values = {}  # Cache for retaining last known values
 
-    def initialize(self, broker_name: str, user_id: str, auth_data: Optional[Dict[str, str]] = None) -> None:
+    def initialize(
+        self, broker_name: str, user_id: str, auth_data: dict[str, str] | None = None
+    ) -> None:
         """
         Initialize connection with INDmoney WebSocket API
 
@@ -63,7 +62,7 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 raise ValueError(f"No access token found for user {user_id}")
         else:
             # Use provided token
-            access_token = auth_data.get('access_token') or auth_data.get('auth_token')
+            access_token = auth_data.get("access_token") or auth_data.get("auth_token")
 
             if not access_token:
                 self.logger.error("Missing required access token")
@@ -75,7 +74,7 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             max_retry_attempt=5,
             retry_strategy=1,  # Exponential backoff
             retry_delay=5,
-            retry_multiplier=2
+            retry_multiplier=2,
         )
 
         # Set callbacks
@@ -100,14 +99,18 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         """Connect to INDmoney WebSocket with retry logic"""
         while self.running and self.reconnect_attempts < self.max_reconnect_attempts:
             try:
-                self.logger.info(f"Connecting to INDmoney WebSocket (attempt {self.reconnect_attempts + 1})")
+                self.logger.info(
+                    f"Connecting to INDmoney WebSocket (attempt {self.reconnect_attempts + 1})"
+                )
                 self.ws_client.connect()
                 self.reconnect_attempts = 0  # Reset attempts on successful connection
                 break
 
             except Exception as e:
                 self.reconnect_attempts += 1
-                delay = min(self.reconnect_delay * (2 ** self.reconnect_attempts), self.max_reconnect_delay)
+                delay = min(
+                    self.reconnect_delay * (2**self.reconnect_attempts), self.max_reconnect_delay
+                )
                 self.logger.error(f"Connection failed: {e}. Retrying in {delay} seconds...")
                 time.sleep(delay)
 
@@ -117,13 +120,15 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
     def disconnect(self) -> None:
         """Disconnect from INDmoney WebSocket"""
         self.running = False
-        if hasattr(self, 'ws_client') and self.ws_client:
+        if hasattr(self, "ws_client") and self.ws_client:
             self.ws_client.close_connection()
 
         # Clean up ZeroMQ resources
         self.cleanup_zmq()
 
-    def subscribe(self, symbol: str, exchange: str, mode: int = 2, depth_level: int = 1) -> Dict[str, Any]:
+    def subscribe(
+        self, symbol: str, exchange: str, mode: int = 2, depth_level: int = 1
+    ) -> dict[str, Any]:
         """
         Subscribe to market data with INDmoney-specific implementation
 
@@ -139,20 +144,18 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         # Validate the mode
         if mode not in [1, 2]:
             return self._create_error_response(
-                "INVALID_MODE",
-                f"Invalid mode {mode}. INDmoney supports only 1 (LTP) or 2 (Quote)"
+                "INVALID_MODE", f"Invalid mode {mode}. INDmoney supports only 1 (LTP) or 2 (Quote)"
             )
 
         # Map symbol to token using symbol mapper
         token_info = SymbolMapper.get_token_from_symbol(symbol, exchange)
         if not token_info:
             return self._create_error_response(
-                "SYMBOL_NOT_FOUND",
-                f"Symbol {symbol} not found for exchange {exchange}"
+                "SYMBOL_NOT_FOUND", f"Symbol {symbol} not found for exchange {exchange}"
             )
 
-        token = token_info['token']
-        brexchange = token_info['brexchange']
+        token = token_info["token"]
+        brexchange = token_info["brexchange"]
 
         # Create INDmoney instrument token (SEGMENT:TOKEN format)
         instrument_token = IndmoneyExchangeMapper.create_instrument_token(brexchange, token)
@@ -166,31 +169,34 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         # Store subscription for reconnection
         with self.lock:
             self.subscriptions[correlation_id] = {
-                'symbol': symbol,
-                'exchange': exchange,
-                'brexchange': brexchange,
-                'token': token,
-                'instrument_token': instrument_token,
-                'mode': mode,
-                'indmoney_mode': indmoney_mode,
-                'depth_level': depth_level
+                "symbol": symbol,
+                "exchange": exchange,
+                "brexchange": brexchange,
+                "token": token,
+                "instrument_token": instrument_token,
+                "mode": mode,
+                "indmoney_mode": indmoney_mode,
+                "depth_level": depth_level,
             }
 
         # Subscribe if connected
-        self.logger.info(f"Checking connection status: connected={self.connected}, ws_client={self.ws_client is not None}")
+        self.logger.info(
+            f"Checking connection status: connected={self.connected}, ws_client={self.ws_client is not None}"
+        )
         if self.connected and self.ws_client:
             try:
-                self.logger.info(f"ATTEMPTING SUBSCRIPTION: {symbol}.{exchange}, instrument_token={instrument_token}, mode={indmoney_mode}")
-                self.ws_client.subscribe(
-                    instruments=[instrument_token],
-                    mode=indmoney_mode
+                self.logger.info(
+                    f"ATTEMPTING SUBSCRIPTION: {symbol}.{exchange}, instrument_token={instrument_token}, mode={indmoney_mode}"
                 )
+                self.ws_client.subscribe(instruments=[instrument_token], mode=indmoney_mode)
                 self.logger.info(f"SUBSCRIPTION SENT: {symbol}.{exchange} in {indmoney_mode} mode")
             except Exception as e:
                 self.logger.error(f"SUBSCRIPTION ERROR for {symbol}.{exchange}: {e}", exc_info=True)
                 return self._create_error_response("SUBSCRIPTION_ERROR", str(e))
         else:
-            self.logger.warning(f"NOT CONNECTED YET - subscription will be sent when connection opens")
+            self.logger.warning(
+                "NOT CONNECTED YET - subscription will be sent when connection opens"
+            )
 
         # Return success
         return self._create_success_response(
@@ -198,10 +204,10 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             symbol=symbol,
             exchange=exchange,
             mode=mode,
-            instrument_token=instrument_token
+            instrument_token=instrument_token,
         )
 
-    def unsubscribe(self, symbol: str, exchange: str, mode: int = 2) -> Dict[str, Any]:
+    def unsubscribe(self, symbol: str, exchange: str, mode: int = 2) -> dict[str, Any]:
         """
         Unsubscribe from market data
 
@@ -217,12 +223,11 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         token_info = SymbolMapper.get_token_from_symbol(symbol, exchange)
         if not token_info:
             return self._create_error_response(
-                "SYMBOL_NOT_FOUND",
-                f"Symbol {symbol} not found for exchange {exchange}"
+                "SYMBOL_NOT_FOUND", f"Symbol {symbol} not found for exchange {exchange}"
             )
 
-        token = token_info['token']
-        brexchange = token_info['brexchange']
+        token = token_info["token"]
+        brexchange = token_info["brexchange"]
 
         # Create INDmoney instrument token
         instrument_token = IndmoneyExchangeMapper.create_instrument_token(brexchange, token)
@@ -234,33 +239,40 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         correlation_id = f"{symbol}_{exchange}_{mode}"
 
         # Remove from subscriptions
+        should_disconnect = False
         with self.lock:
             if correlation_id in self.subscriptions:
                 del self.subscriptions[correlation_id]
+            # Check if all subscriptions are removed
+            if len(self.subscriptions) == 0:
+                should_disconnect = True
+            # Clear cached values for this symbol
+            cache_key = f"{symbol}_{exchange}"
+            if cache_key in self.last_values:
+                del self.last_values[cache_key]
 
         # Unsubscribe if connected
         if self.connected and self.ws_client:
             try:
-                self.ws_client.unsubscribe(
-                    instruments=[instrument_token],
-                    mode=indmoney_mode
-                )
+                self.ws_client.unsubscribe(instruments=[instrument_token], mode=indmoney_mode)
                 self.logger.info(f"Unsubscribed from {symbol}.{exchange}")
             except Exception as e:
                 self.logger.error(f"Error unsubscribing from {symbol}.{exchange}: {e}")
                 return self._create_error_response("UNSUBSCRIPTION_ERROR", str(e))
 
+        # Disconnect from broker if no subscriptions remain
+        if should_disconnect:
+            self.logger.info("No subscriptions remaining, disconnecting from broker")
+            self.disconnect()
+
         return self._create_success_response(
-            f"Unsubscribed from {symbol}.{exchange}",
-            symbol=symbol,
-            exchange=exchange,
-            mode=mode
+            f"Unsubscribed from {symbol}.{exchange}", symbol=symbol, exchange=exchange, mode=mode
         )
 
     def _on_open(self, wsapp) -> None:
         """Callback when connection is established"""
         self.logger.info("==================== WEBSOCKET OPENED ====================")
-        self.logger.info(f"Connection established to INDmoney WebSocket")
+        self.logger.info("Connection established to INDmoney WebSocket")
         self.connected = True
 
         # Resubscribe to existing subscriptions if reconnecting
@@ -272,29 +284,41 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             quote_instruments = []
 
             for correlation_id, sub in self.subscriptions.items():
-                instrument_token = sub['instrument_token']
-                mode = sub['indmoney_mode']
-                self.logger.info(f"  - {correlation_id}: instrument={instrument_token}, mode={mode}")
+                instrument_token = sub["instrument_token"]
+                mode = sub["indmoney_mode"]
+                self.logger.info(
+                    f"  - {correlation_id}: instrument={instrument_token}, mode={mode}"
+                )
 
-                if mode == 'ltp':
+                if mode == "ltp":
                     ltp_instruments.append(instrument_token)
-                elif mode == 'quote':
+                elif mode == "quote":
                     quote_instruments.append(instrument_token)
 
             # Resubscribe in batches
             try:
                 if ltp_instruments:
-                    self.logger.info(f"RESUBSCRIBING to {len(ltp_instruments)} LTP instruments: {ltp_instruments}")
-                    self.ws_client.subscribe(instruments=ltp_instruments, mode='ltp')
-                    self.logger.info(f"✓ Resubscribed to {len(ltp_instruments)} instruments in LTP mode")
+                    self.logger.info(
+                        f"RESUBSCRIBING to {len(ltp_instruments)} LTP instruments: {ltp_instruments}"
+                    )
+                    self.ws_client.subscribe(instruments=ltp_instruments, mode="ltp")
+                    self.logger.info(
+                        f"✓ Resubscribed to {len(ltp_instruments)} instruments in LTP mode"
+                    )
 
                 if quote_instruments:
-                    self.logger.info(f"RESUBSCRIBING to {len(quote_instruments)} QUOTE instruments: {quote_instruments}")
-                    self.ws_client.subscribe(instruments=quote_instruments, mode='quote')
-                    self.logger.info(f"✓ Resubscribed to {len(quote_instruments)} instruments in QUOTE mode")
+                    self.logger.info(
+                        f"RESUBSCRIBING to {len(quote_instruments)} QUOTE instruments: {quote_instruments}"
+                    )
+                    self.ws_client.subscribe(instruments=quote_instruments, mode="quote")
+                    self.logger.info(
+                        f"✓ Resubscribed to {len(quote_instruments)} instruments in QUOTE mode"
+                    )
 
                 if not ltp_instruments and not quote_instruments:
-                    self.logger.warning("No subscriptions to resubscribe (subscriptions list is empty)")
+                    self.logger.warning(
+                        "No subscriptions to resubscribe (subscriptions list is empty)"
+                    )
 
             except Exception as e:
                 self.logger.error(f"Error resubscribing: {e}", exc_info=True)
@@ -339,13 +363,15 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             # }
 
             if not isinstance(message, dict):
-                self.logger.warning(f"[WARN] Message is not a dictionary after parsing: {type(message)}")
+                self.logger.warning(
+                    f"[WARN] Message is not a dictionary after parsing: {type(message)}"
+                )
                 return
 
             # Extract instrument token and mode
-            instrument = message.get('instrument')
-            mode = message.get('mode')
-            data = message.get('data', {})
+            instrument = message.get("instrument")
+            mode = message.get("mode")
+            data = message.get("data", {})
 
             self.logger.info(f"[DATA] Instrument={instrument}, Mode={mode}, Data={data}")
 
@@ -358,7 +384,7 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             with self.lock:
                 for sub in self.subscriptions.values():
                     # INDmoney returns only the token part, not the full SEGMENT:TOKEN
-                    if sub['token'] == instrument:
+                    if sub["token"] == instrument:
                         subscription = sub
                         break
 
@@ -367,23 +393,26 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 return
 
             # Create topic for ZeroMQ
-            symbol = subscription['symbol']
-            exchange = subscription['exchange']
+            symbol = subscription["symbol"]
+            exchange = subscription["exchange"]
 
             # Map INDmoney mode to OpenAlgo mode string
-            mode_str = 'LTP' if mode == 'ltp' else 'QUOTE'
+            mode_str = "LTP" if mode == "ltp" else "QUOTE"
             topic = f"{exchange}_{symbol}_{mode_str}"
 
-            # Normalize the data
-            market_data = self._normalize_market_data(message, mode)
+            # Normalize the data with caching for value retention
+            cache_key = f"{symbol}_{exchange}"
+            market_data = self._normalize_market_data(message, mode, cache_key)
 
             # Add metadata
-            market_data.update({
-                'symbol': symbol,
-                'exchange': exchange,
-                'mode': subscription['mode'],
-                'timestamp': message.get('timestamp', int(time.time() * 1000))
-            })
+            market_data.update(
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "mode": subscription["mode"],
+                    "timestamp": message.get("timestamp", int(time.time() * 1000)),
+                }
+            )
 
             # Log and publish
             self.logger.debug(f"Publishing market data: topic={topic}, data={market_data}")
@@ -392,44 +421,64 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         except Exception as e:
             self.logger.error(f"Error processing market data: {e}", exc_info=True)
 
-    def _normalize_market_data(self, message: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    def _normalize_market_data(
+        self, message: dict[str, Any], mode: str, cache_key: str
+    ) -> dict[str, Any]:
         """
-        Normalize broker-specific data format to a common format
+        Normalize broker-specific data format to a common format.
+        Retains previous values if new value is 0 or missing.
 
         Args:
             message: The raw message from the broker
             mode: Subscription mode ('ltp' or 'quote')
+            cache_key: Key for caching values (symbol_exchange)
 
         Returns:
             Dict: Normalized market data
         """
-        data = message.get('data', {})
-        timestamp = message.get('timestamp', int(time.time() * 1000))
+        data = message.get("data", {})
+        timestamp = message.get("timestamp", int(time.time() * 1000))
 
-        if mode == 'ltp':
-            return {
-                'ltp': data.get('ltp', 0),
-                'ltt': timestamp
-            }
-        elif mode == 'quote':
-            # Quote mode provides more detailed information
-            # Structure depends on what INDmoney actually sends
-            # Based on typical quote data structure:
-            return {
-                'ltp': data.get('ltp', 0),
-                'ltt': timestamp,
-                'open': data.get('open', 0),
-                'high': data.get('high', 0),
-                'low': data.get('low', 0),
-                'close': data.get('close', 0),
-                'volume': data.get('volume', 0),
-                'bid_price': data.get('bid_price', 0),
-                'bid_qty': data.get('bid_qty', 0),
-                'ask_price': data.get('ask_price', 0),
-                'ask_qty': data.get('ask_qty', 0),
-                'average_price': data.get('average_price', 0),
-                'oi': data.get('oi', 0),
-                'oi_change': data.get('oi_change', 0)
+        # Get cached values for this symbol - thread-safe copy
+        with self.lock:
+            cached = self.last_values.get(cache_key, {}).copy()
+
+        def get_value(key: str, default=0):
+            """Get new value if non-zero, otherwise return cached value"""
+            new_val = data.get(key, 0)
+            if new_val != 0:
+                return new_val
+            return cached.get(key, default)
+
+        if mode == "ltp":
+            result = {"ltp": get_value("ltp"), "ltt": timestamp}
+        elif mode == "quote":
+            result = {
+                "ltp": get_value("ltp"),
+                "ltt": timestamp,
+                "open": get_value("open"),
+                "high": get_value("high"),
+                "low": get_value("low"),
+                "close": get_value("close"),
+                "volume": get_value("volume"),
+                "bid_price": get_value("bid_price"),
+                "bid_qty": get_value("bid_qty"),
+                "ask_price": get_value("ask_price"),
+                "ask_qty": get_value("ask_qty"),
+                "average_price": get_value("average_price"),
+                "oi": get_value("oi"),
+                "oi_change": get_value("oi_change"),
             }
         else:
-            return {}
+            result = {}
+
+        # Update cache with current values (only non-zero values) - thread-safe
+        if result:
+            with self.lock:
+                if cache_key not in self.last_values:
+                    self.last_values[cache_key] = {}
+                for key, val in result.items():
+                    if val != 0 and key != "ltt":
+                        self.last_values[cache_key][key] = val
+
+        return result
